@@ -559,7 +559,7 @@ def budget_management():
                 tx = BudgetTransaction(date=date.strftime("%Y-%m-%d"), category=cat, amount=amt, description=desc, type=typ)
                 project.budget_entries.append(tx)
                 st.success("Transaction added")
-                st.experimental_rerun()
+                st.rerun()
     # show table and charts
     if project.budget_entries:
         df = pd.DataFrame([asdict(t) for t in project.budget_entries])
@@ -650,7 +650,7 @@ def milestones_view():
                         ms.status = "reached"
                         ms.date = datetime.now().strftime("%Y-%m-%d")
                         st.success("Milestone reached")
-                        st.experimental_rerun()
+                        st.rerun()
                 else:
                     st.info("Milestone prerequisites not fulfilled")
 
@@ -686,7 +686,7 @@ def iterations_view():
                 if release_doc_name not in project.documents:
                     project.documents[release_doc_name] = HermesDocument(name=release_doc_name, responsible="Project Manager", linked_result=release_result_name)
                 st.success("Iteration created")
-                st.experimental_rerun()
+                st.rerun()
     # display iterations
     for it in project.iterations:
         with st.expander(f"{it.number} - {it.name} ({it.status})", expanded=False):
@@ -900,7 +900,7 @@ def sidebar_persistence():
             newproj = import_project_json_bytes(uploaded.read())
             st.session_state.hermes_project = newproj
             st.sidebar.success("Project imported")
-            st.experimental_rerun()
+            st.rerun()
         except Exception as e:
             st.sidebar.error(f"Import failed: {e}")
 
