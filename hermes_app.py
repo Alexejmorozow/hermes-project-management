@@ -1,4 +1,4 @@
-# app.py
+# hermes_app.py
 import streamlit as st
 import pandas as pd
 import json
@@ -8,15 +8,15 @@ from typing import List, Dict, Optional
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
-from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+import matplotlib.pyplot as plt
 
-# =========================================
-# DATACLASSES (KERN)
-# =========================================
+# ----------------------
+# DATACLASSES
+# ----------------------
 @dataclass
 class ProjectMasterData:
     project_name: str = ""
@@ -25,15 +25,15 @@ class ProjectMasterData:
     user_representative: str = ""
     start_date: str = ""
     budget: float = 0.0
-    approach: str = "classical"
-    project_size: str = "medium"
-    current_phase: str = "initialization"
+    approach: str = "classical"  # 'classical' or 'agile'
+    project_size: str = "medium"  # small/medium/large
+    language: str = "en"  # 'en' or 'de'
 
 @dataclass
 class PhaseResult:
     name: str
     description: str = ""
-    status: str = "not_started"  # not_started, in_progress, completed, approved
+    status: str = "not_started"  # not_started/in_progress/completed/approved
     approval_required: bool = False
     approval_date: str = ""
     responsible_role: str = ""
@@ -44,7 +44,7 @@ class ProjectPhase:
     results: Dict[str, PhaseResult] = field(default_factory=dict)
     required_documents: List[str] = field(default_factory=list)
     checklist_results: Dict[str, bool] = field(default_factory=dict)
-    status: str = "not_started"  # not_started, active, completed
+    status: str = "not_started"
     start_date: str = ""
     end_date: str = ""
 
@@ -52,7 +52,7 @@ class ProjectPhase:
 class HermesDocument:
     name: str
     responsible: str = ""
-    status: str = "not_started"  # not_started, in_progress, completed
+    status: str = "not_started"  # not_started/in_progress/completed
     required: bool = True
     linked_result: str = ""
     content: str = ""
@@ -62,7 +62,7 @@ class HermesMilestone:
     name: str
     phase: str
     date: str = ""
-    status: str = "planned"  # planned, reached, delayed
+    status: str = "planned"  # planned/reached/delayed
     mandatory: bool = True
 
 @dataclass
@@ -99,888 +99,854 @@ class HermesProject:
     budget_entries: List[BudgetTransaction] = field(default_factory=list)
     actual_costs: float = 0.0
     tailoring: Dict = field(default_factory=dict)
-    roles: Dict[str, str] = field(default_factory=dict)  # role -> person
+    current_phase: str = "initialization"
+    risks: List[Dict] = field(default_factory=list)
 
-# =========================================
-# KONFIGURATIONEN / TEMPLATES / CHECKLISTS
-# =========================================
-# Phase labels used in UI
-HERMES_PHASE_LABELS_CLASSICAL = {
-    "initialization": "Initialization",
-    "concept": "Concept",
-    "realization": "Realization",
-    "introduction": "Introduction",
-    "completion": "Completion"
-}
-HERMES_PHASE_LABELS_AGILE = {
-    "initialization": "Initialization",
-    "implementation": "Implementation",
-    "completion": "Completion"
-}
+# ----------------------
+# CONSTANTS: Roles, Checklists, Project size tailoring
+# ----------------------
+HERMES_ROLES = [
+    "Steering Committee", "Project Manager", "User Representative",
+    "Quality Assurance", "Operations", "Project Controller"
+]
 
-# Minimal results templates (can be extended)
-RESULT_TEMPLATES = {
-    "Project Charter": {"description": "Formal project initiation document", "approval_required": True, "role": "project_manager"},
-    "Stakeholder Analysis": {"description": "Identification and analysis of stakeholders", "approval_required": False, "role": "project_manager"},
-    "Requirements Specification": {"description": "Detailed requirements", "approval_required": True, "role": "user_representative"},
-    "Solution Concept": {"description": "High-level solution description", "approval_required": True, "role": "project_manager"},
-    # Releases for agile
-    "Release 1": {"description": "First product release", "approval_required": True, "role": "project_manager"},
-    "Release 2": {"description": "Second product release", "approval_required": True, "role": "project_manager"},
+# Checklists: full & simplified (extendable)
+HERMES_CHECKLISTS = {
+    "initialization": {
+        "full": [
+            "Project Charter approved by Steering Committee",
+            "Stakeholders identified and analysed",
+            "Initial risk assessment completed",
+            "Project organization defined",
+            "Budget estimation completed"
+        ],
+        "simplified": [
+            "Project Charter created",
+            "Stakeholders listed",
+            "Budget rough estimation"
+        ]
+    },
+    "concept": {
+        "full": [
+            "Requirements documented and validated",
+            "Solution architecture defined",
+            "Feasibility study completed",
+            "Risks updated and accepted",
+            "Cost-benefit analysis done"
+        ],
+        "simplified": [
+            "Requirements documented",
+            "Solution draft created"
+        ]
+    },
+    "implementation": {
+        "full": [
+            "Development completed according to specification",
+            "Integration tests executed",
+            "Acceptance tests executed",
+            "Operational documentation prepared"
+        ],
+        "simplified": [
+            "Core features implemented",
+            "Basic tests passed"
+        ]
+    },
+    "introduction": {
+        "full": [
+            "Acceptance by client completed",
+            "Operational handover completed",
+            "Training of operations staff completed",
+            "Support organization defined"
+        ],
+        "simplified": [
+            "Acceptance completed",
+            "Handover done"
+        ]
+    },
+    "completion": {
+        "full": [
+            "Lessons learned documented",
+            "Final acceptance signed",
+            "Project finances closed",
+            "All deliverables archived"
+        ],
+        "simplified": [
+            "Final acceptance",
+            "Lessons learned short report"
+        ]
+    }
 }
-
-# Project size configs (tailoring)
-@dataclass
-class ProjectSizeConfig:
-    required_documents: List[str] = field(default_factory=list)
-    optional_documents: List[str] = field(default_factory=list)
-    simplified_checklists: bool = False
-    mandatory_milestones: List[str] = field(default_factory=list)
-    extra_roles: List[str] = field(default_factory=list)
 
 PROJECT_SIZE_CONFIGS = {
-    "small": ProjectSizeConfig(
-        required_documents=["Project Charter", "Acceptance Protocol"],
-        optional_documents=["Study", "Migration Concept"],
-        simplified_checklists=True,
-        mandatory_milestones=["Project Initialization", "Project Completion"],
-        extra_roles=[]
-    ),
-    "medium": ProjectSizeConfig(
-        required_documents=["Project Charter", "Project Management Plan", "Requirements Specification", "Solution Concept", "Acceptance Protocol"],
-        optional_documents=["Migration Concept"],
-        simplified_checklists=False,
-        mandatory_milestones=["Project Initialization", "Implementation Decision", "Project Completion"],
-        extra_roles=["project_controller"]
-    ),
-    "large": ProjectSizeConfig(
-        required_documents=["Project Charter", "Project Management Plan", "Requirements Specification", "Solution Concept", "Test Concept", "Acceptance Protocol", "Project Completion Report"],
-        optional_documents=[],
-        simplified_checklists=False,
-        mandatory_milestones=["Project Initialization", "Implementation Decision", "Phase Release Concept", "Phase Release Realization", "Project Completion"],
-        extra_roles=["project_controller", "quality_manager"]
-    )
-}
-
-# Checklists
-HERMES_CHECKLISTS = {
-    "initialization_comprehensive": [
-        "Project mandate verified",
-        "Stakeholder analysis performed",
-        "Budget & resources sufficient",
-        "High-level risks identified",
-        "Project approach decided"
-    ],
-    "initialization_simplified": [
-        "Project mandate exists",
-        "Responsible persons assigned"
-    ],
-    "concept_comprehensive": [
-        "Requirements validated with users",
-        "Solution alternatives assessed",
-        "Economic efficiency proven",
-        "Security & protection considered"
-    ],
-    "concept_simplified": [
-        "Requirements discussed",
-        "Solution direction agreed"
-    ],
-    "implementation_comprehensive": [
-        "Test strategy defined",
-        "Migration concept finalized",
-        "Operational readiness planned"
-    ],
-    "completion_comprehensive": [
-        "Operational handover completed",
-        "Final acceptance signed",
-        "Lessons learned documented",
-        "Financial closure performed"
-    ],
-    "completion_simplified": [
-        "Handover done",
-        "Acceptance obtained"
-    ]
-}
-
-# Default roles
-DEFAULT_HERMES_ROLES = {
-    "client": "Client",
-    "project_manager": "Project Manager",
-    "user_representative": "User Representative",
-    "project_controller": "Project Controller",
-    "quality_manager": "Quality Manager"
-}
-
-# =========================================
-# INSTRUCTIONS HELPER
-# =========================================
-def show_instructions(title: str, text: str, expanded: bool = True):
-    """Show an instruction block with a title and text"""
-    with st.expander(f"ℹ️ {title} — Instructions", expanded=expanded):
-        st.markdown(text)
-
-# =========================================
-# INITIALIZATION / SESSION STATE
-# =========================================
-def init_session_state():
-    if "hermes_project" not in st.session_state:
-        p = HermesProject()
-        # By default create classical phases
-        p.master_data.current_phase = "initialization"
-        st.session_state.hermes_project = p
-    # ensure some helper containers exist
-    proj = st.session_state.hermes_project
-    if not proj.phases:
-        initialize_standard_phases(proj)
-    if not proj.documents:
-        init_project_structure(proj)
-    if not proj.roles:
-        proj.roles = DEFAULT_HERMES_ROLES.copy()
-
-def initialize_standard_phases(project: HermesProject):
-    """Initialize phases depending on approach (default classical)"""
-    labels = HERMES_PHASE_LABELS_CLASSICAL if project.master_data.approach == "classical" else HERMES_PHASE_LABELS_AGILE
-    project.phases.clear()
-    for key, lbl in labels.items():
-        project.phases[key] = ProjectPhase(name=lbl)
-        # Add default checklist based on size and phase later when tailoring applied
-
-def init_project_structure(project: HermesProject):
-    """Initialize default documents and some default results from templates"""
-    # create standard documents (from templates and required lists)
-    docs = {
-        "Project Charter": HermesDocument(name="Project Charter", responsible="Project Manager", required=True, linked_result="Project Charter"),
-        "Stakeholder Analysis": HermesDocument(name="Stakeholder Analysis", responsible="Project Manager", required=True, linked_result="Stakeholder Analysis"),
-        "Requirements Specification": HermesDocument(name="Requirements Specification", responsible="User Representative", required=True, linked_result="Requirements Specification"),
-        "Solution Concept": HermesDocument(name="Solution Concept", responsible="Project Manager", required=True, linked_result="Solution Concept"),
-        "Acceptance Protocol": HermesDocument(name="Acceptance Protocol", responsible="Client", required=True),
-        "Project Completion Report": HermesDocument(name="Project Completion Report", responsible="Project Manager", required=True)
+    "small": {
+        "simplified_checklists": True,
+        "required_documents": ["Project Charter", "Acceptance Protocol"],
+        "optional_documents": ["Study", "Operating Handbook"],
+        "mandatory_milestones": ["Project Start", "Project Completed"]
+    },
+    "medium": {
+        "simplified_checklists": False,
+        "required_documents": ["Project Charter", "Project Management Plan", "Solution Requirements"],
+        "optional_documents": ["Migration Concept"],
+        "mandatory_milestones": ["Project Start", "Implementation Decision", "Project Completed"]
+    },
+    "large": {
+        "simplified_checklists": False,
+        "required_documents": ["Project Charter", "Study", "Project Management Plan", "Solution Architecture", "Test Concept"],
+        "optional_documents": [],
+        "mandatory_milestones": ["Project Start", "Implementation Decision", "Phase Release Concept", "Phase Release Realization", "Project Completed"]
     }
-    project.documents.update(docs)
+}
 
-    # init default results in phases from RESULT_TEMPLATES where reasonable
-    for phase_key, phase in project.phases.items():
-        # common mapping (simplified for demo)
-        if phase_key == "initialization":
-            names = ["Project Charter", "Stakeholder Analysis"]
-        elif phase_key == "concept":
-            names = ["Requirements Specification", "Solution Concept"]
-        elif phase_key == "implementation" or phase_key == "realization":
-            names = ["Test Concept"]
-        elif phase_key == "introduction":
-            names = ["Acceptance Protocol", "Operational Handover"] if "Operational Handover" in RESULT_TEMPLATES else ["Acceptance Protocol"]
-        else:
-            names = []
-        for name in names:
-            tmpl = RESULT_TEMPLATES.get(name, {"description": "", "approval_required": False, "role": ""})
-            phase.results[name] = PhaseResult(
-                name=name,
-                description=tmpl["description"],
-                status="not_started",
-                approval_required=tmpl.get("approval_required", False),
-                responsible_role=tmpl.get("role", "")
+# ----------------------
+# SERIALIZATION HELPERS
+# ----------------------
+def dataclass_to_dict(obj):
+    """Recursively convert dataclass instances to dictionaries (for JSON export)"""
+    if isinstance(obj, list):
+        return [dataclass_to_dict(i) for i in obj]
+    elif hasattr(obj, "__dataclass_fields__"):
+        result = {}
+        for k, v in asdict(obj).items():
+            result[k] = dataclass_to_dict(v)
+        result["_type"] = obj.__class__.__name__
+        return result
+    elif isinstance(obj, dict):
+        return {k: dataclass_to_dict(v) for k, v in obj.items()}
+    else:
+        return obj
+
+def dict_to_dataclass(d):
+    """Convert the top-level structure (expects HermesProject-like dict)."""
+    # This is a practical approach assuming exported structure from dataclass_to_dict
+    # We'll manually reconstruct HermesProject
+    try:
+        md = d.get("master_data", {})
+        master = ProjectMasterData(**md)
+        project = HermesProject(master_data=master)
+        # phases
+        for pname, pdata in d.get("phases", {}).items():
+            phase = ProjectPhase(name=pdata.get("name", pname),
+                                 status=pdata.get("status", "not_started"),
+                                 start_date=pdata.get("start_date", ""),
+                                 end_date=pdata.get("end_date", ""))
+            # results
+            for rname, rdata in pdata.get("results", {}).items():
+                rr = PhaseResult(
+                    name=rdata.get("name", rname),
+                    description=rdata.get("description", ""),
+                    status=rdata.get("status", "not_started"),
+                    approval_required=rdata.get("approval_required", False),
+                    approval_date=rdata.get("approval_date", ""),
+                    responsible_role=rdata.get("responsible_role", "")
+                )
+                phase.results[rname] = rr
+            # checklist
+            phase.checklist_results = pdata.get("checklist_results", {})
+            project.phases[pname] = phase
+        # documents
+        for dname, ddata in d.get("documents", {}).items():
+            doc = HermesDocument(
+                name=ddata.get("name", dname),
+                responsible=ddata.get("responsible", ""),
+                status=ddata.get("status", "not_started"),
+                required=ddata.get("required", True),
+                linked_result=ddata.get("linked_result", ""),
+                content=ddata.get("content", "")
             )
+            project.documents[dname] = doc
+        # milestones
+        for ms in d.get("milestones", []):
+            m = HermesMilestone(
+                name=ms.get("name", ""),
+                phase=ms.get("phase", ""),
+                date=ms.get("date", ""),
+                status=ms.get("status", "planned"),
+                mandatory=ms.get("mandatory", True)
+            )
+            project.milestones.append(m)
+        # iterations
+        for it in d.get("iterations", []):
+            iteration = Iteration(
+                number=it.get("number", 1),
+                name=it.get("name", f"Sprint {it.get('number',1)}"),
+                start_date=it.get("start_date", ""),
+                end_date=it.get("end_date", ""),
+                total_user_stories=it.get("total_user_stories", 0),
+                completed_user_stories=it.get("completed_user_stories", 0),
+                release_candidate=it.get("release_candidate", False),
+                release_approved=it.get("release_approved", False),
+                status=it.get("status", "planned"),
+                goals=it.get("goals", [])
+            )
+            project.iterations.append(iteration)
+        # budget
+        for t in d.get("budget_entries", []):
+            tr = BudgetTransaction(
+                date=t.get("date", ""),
+                category=t.get("category", ""),
+                amount=t.get("amount", 0.0),
+                description=t.get("description", ""),
+                type=t.get("type", "actual")
+            )
+            project.budget_entries.append(tr)
+        project.actual_costs = d.get("actual_costs", 0.0)
+        project.current_phase = d.get("current_phase", "initialization")
+        project.tailoring = d.get("tailoring", {})
+        return project
+    except Exception as e:
+        st.error(f"Error parsing project JSON: {e}")
+        return HermesProject()
 
-# =========================================
-# TAILORING (project size)
-# =========================================
-def apply_project_size_tailoring(project: HermesProject):
-    """Apply tailoring according to project.master_data.project_size"""
-    config = PROJECT_SIZE_CONFIGS.get(project.master_data.project_size, PROJECT_SIZE_CONFIGS["medium"])
-    # mark docs required/optional
-    for name, doc in project.documents.items():
-        if name in config.required_documents:
-            doc.required = True
-        elif name in config.optional_documents:
-            doc.required = False
-    # set checklist items for phases
-    for key, phase in project.phases.items():
-        if config.simplified_checklists:
-            # choose simplified variant if exists
-            checklist_key = f"{key}_simplified"
-            # fallback to comprehensive
-            checklist_items = HERMES_CHECKLISTS.get(checklist_key, HERMES_CHECKLISTS.get(f"{key}_comprehensive", []))
-        else:
-            checklist_items = HERMES_CHECKLISTS.get(f"{key}_comprehensive", [])
-        # initialize checklist results if not present
-        for item in checklist_items:
-            if item not in phase.checklist_results:
-                phase.checklist_results[item] = False
-    # apply roles extras
-    for r in config.extra_roles:
-        if r not in project.roles:
-            project.roles[r] = r.replace("_", " ").title()
-    project.tailoring = {"applied_size": project.master_data.project_size, "config": config}
+# ----------------------
+# INIT / DEFAULTS
+# ----------------------
+def init_session_state():
+    if 'hermes_project' not in st.session_state:
+        st.session_state.hermes_project = HermesProject()
+        # initialize default classical phases
+        default_phases = {
+            "initialization": ProjectPhase("Initialization"),
+            "concept": ProjectPhase("Concept"),
+            "implementation": ProjectPhase("Implementation"),
+            "introduction": ProjectPhase("Introduction"),
+            "completion": ProjectPhase("Completion")
+        }
+        st.session_state.hermes_project.phases = default_phases
+        # default required docs (can be tailored)
+        default_docs = ["Project Charter", "Project Management Plan", "Solution Requirements", "Acceptance Protocol"]
+        for dn in default_docs:
+            st.session_state.hermes_project.documents[dn] = HermesDocument(name=dn, responsible="Project Manager", required=True)
+        # default milestones
+        st.session_state.hermes_project.milestones = [
+            HermesMilestone("Project Start", "initialization", mandatory=True),
+            HermesMilestone("Implementation Decision", "concept", mandatory=True),
+            HermesMilestone("Project Completed", "completion", mandatory=True)
+        ]
 
-# =========================================
-# VALIDATION, GOVERNANCE, HELPERS
-# =========================================
-def validate_minimal_roles(project: HermesProject) -> List[str]:
-    missing = []
-    if not project.master_data.project_manager:
-        missing.append("Project Manager")
-    if not project.master_data.user_representative:
-        missing.append("User Representative")
-    if not project.master_data.client:
-        missing.append("Client")
-    return missing
-
-def validate_phase_completion(phase: ProjectPhase) -> Dict[str, bool]:
-    """Check whether a phase can be completed: all approval-required results approved, required docs completed, checklist items done"""
-    result_ok = True
-    for r in phase.results.values():
-        if r.approval_required and r.status != "approved":
-            result_ok = False
-            break
-    docs_ok = True
-    # find documents linked to results in this phase and required docs specifically listed
-    for doc_name in phase.required_documents:
-        doc = st.session_state.hermes_project.documents.get(doc_name)
-        if doc and doc.required and doc.status != "completed":
-            docs_ok = False
-            break
-    checklist_ok = all(phase.checklist_results.values()) if phase.checklist_results else True
-    return {
-        "results_completed": result_ok,
-        "documents_ready": docs_ok,
-        "checklists_completed": checklist_ok,
-        "can_complete": result_ok and docs_ok and checklist_ok
-    }
-
-def validate_milestone_completion(milestone: HermesMilestone, project: HermesProject) -> Dict[str, bool]:
-    """Check milestone against its phase prerequisites"""
-    validation = {
-        "phase_results_complete": True,
-        "required_documents_complete": True,
-        "checklists_complete": True,
-        "can_reach": True
-    }
-    phase = project.phases.get(milestone.phase)
-    if not phase:
-        validation["can_reach"] = False
-        return validation
-    # phase results
-    for r in phase.results.values():
-        if r.approval_required and r.status != "approved":
-            validation["phase_results_complete"] = False
-            break
-    # required docs
-    for doc_name in phase.required_documents:
-        doc = project.documents.get(doc_name)
-        if doc and doc.required and doc.status != "completed":
-            validation["required_documents_complete"] = False
-            break
-    # checklists
-    if phase.checklist_results:
-        if not all(phase.checklist_results.values()):
-            validation["checklists_complete"] = False
-    validation["can_reach"] = validation["phase_results_complete"] and validation["required_documents_complete"] and validation["checklists_complete"]
-    return validation
-
-def calculate_total_progress(project: HermesProject) -> float:
-    if not project.phases:
-        return 0.0
-    vals = []
-    for p in project.phases.values():
-        vals.append(calculate_phase_progress(p))
-    return sum(vals) / len(vals) if vals else 0.0
+# ----------------------
+# CALCULATIONS & UTILITIES
+# ----------------------
+def calculate_budget_usage(project: HermesProject) -> float:
+    actual_costs = sum(t.amount for t in project.budget_entries if t.type == "actual")
+    if project.master_data.budget and project.master_data.budget > 0:
+        return actual_costs / project.master_data.budget
+    return 0.0
 
 def calculate_phase_progress(phase: ProjectPhase) -> float:
     total = len(phase.results)
     if total == 0:
         return 0.0
-    completed = sum(1 for r in phase.results.values() if r.status in ("completed", "approved"))
-    return (completed / total) * 100
+    completed = sum(1 for r in phase.results.values() if r.status in ["completed", "approved"])
+    return completed / total * 100.0
 
-def calculate_budget_usage(project: HermesProject) -> float:
-    actual = sum(t.amount for t in project.budget_entries if t.type == "actual")
-    if project.master_data.budget and project.master_data.budget > 0:
-        return actual / project.master_data.budget
-    return 0.0
+def calculate_total_progress(project: HermesProject) -> float:
+    phases = project.phases.values()
+    if not phases:
+        return 0.0
+    return sum(calculate_phase_progress(p) for p in phases) / len(list(phases))
 
 def calculate_risk_level(project: HermesProject) -> str:
-    # simple heuristic: based on percent completed
-    prog = calculate_total_progress(project)
-    if prog > 80:
+    # simple heuristic
+    progress = calculate_total_progress(project)
+    usage = calculate_budget_usage(project)
+    if progress > 80 and usage < 0.8:
         return "low"
-    elif prog > 50:
+    if progress > 50 or usage < 0.9:
         return "medium"
-    else:
-        return "high"
+    return "high"
 
 def calculate_quality_score(project: HermesProject) -> int:
-    # basic: ratio of approved results + completed checklists
     total_items = 0
-    completed_items = 0
+    good_items = 0
     for p in project.phases.values():
+        for checklist_val in p.checklist_results.values():
+            total_items += 1
+            if checklist_val:
+                good_items += 1
         for r in p.results.values():
             total_items += 1
             if r.status == "approved":
-                completed_items += 1
-        for done in p.checklist_results.values():
-            total_items += 1
-            if done:
-                completed_items += 1
-    return int((completed_items / total_items) * 100) if total_items > 0 else 0
+                good_items += 1
+    return int((good_items / total_items * 100) if total_items > 0 else 0)
 
-def sync_document_to_result(document: HermesDocument, project: HermesProject):
-    """If doc is completed and linked to a result, mark that result completed"""
-    if document.linked_result and document.status == "completed":
-        for phase in project.phases.values():
-            if document.linked_result in phase.results:
-                res = phase.results[document.linked_result]
-                if res.status not in ("completed", "approved"):
-                    res.status = "completed"
+# ----------------------
+# INSTRUCTIONS HELPER (multilingual)
+# ----------------------
+INSTRUCTIONS = {
+    "en": {
+        "dashboard": "Overview of budget, phases, milestones and health indicators. Tip: update costs frequently.",
+        "initialization": "Enter master data, choose approach (classical/agile) and project size. Tailoring will be applied automatically.",
+        "results": "Create and manage results for each phase. Mark results complete and request approvals where required.",
+        "budget": "Add budget transactions (planned/actual) and monitor usage. Export for stakeholders.",
+        "milestones": "Visualize milestones, run governance checks and reach milestones only when prerequisites met.",
+        "iterations": "Create iterations (sprints), track progress and approve releases when criteria fulfilled.",
+        "documents": "Manage documents, link them to results. Completed documents automatically update result status.",
+        "info": "HERMES methodology adapted for configurable classical/agile projects."
+    },
+    "de": {
+        "dashboard": "Übersicht zu Budget, Phasen, Meilensteinen und Gesundheitsindikatoren. Tipp: Kosten regelmässig aktualisieren.",
+        "initialization": "Geben Sie Stammdaten ein, wählen Sie Vorgehen (klassisch/agil) und Projektgröße. Tailoring wird automatisch angewendet.",
+        "results": "Erstellen und verwalten Sie Ergebnisse für jede Phase. Markieren Sie Ergebnisse als abgeschlossen und fordern Sie Genehmigungen an.",
+        "budget": "Fügen Sie Budgettransaktionen (geplant/tatsächlich) hinzu und überwachen Sie die Nutzung. Export für Stakeholder möglich.",
+        "milestones": "Visualisieren Sie Meilensteine, führen Sie Governance-Checks durch und erreichen Sie Meilensteine nur bei Erfüllung der Voraussetzungen.",
+        "iterations": "Erstellen Sie Iterationen (Sprints), verfolgen Sie den Fortschritt und genehmigen Releases, wenn Kriterien erfüllt sind.",
+        "documents": "Verwalten Sie Dokumente und verknüpfen Sie diese mit Ergebnissen. Abgeschlossene Dokumente aktualisieren Ergebnisstatus automatisch.",
+        "info": "HERMES-Methodik, angepasst für konfigurierbare klassische/agile Projekte."
+    }
+}
 
-def auto_advance_phase(project: HermesProject):
-    """Try to move current_phase forward automatically if criteria met"""
-    current = project.master_data.current_phase
-    phase_keys = list(project.phases.keys())
-    if current not in phase_keys:
-        return
-    idx = phase_keys.index(current)
-    phase = project.phases[current]
-    validation = validate_phase_completion(phase)
-    # find milestone for release of this phase (heuristic: milestone exists that's mandatory and refers to this phase)
-    milestone_ready = any(ms.phase == current and ms.status == "reached" for ms in project.milestones)
-    if validation["can_complete"] and milestone_ready:
-        # complete current and activate next
-        phase.status = "completed"
-        phase.end_date = datetime.now().strftime("%Y-%m-%d")
-        if idx + 1 < len(phase_keys):
-            next_key = phase_keys[idx + 1]
-            project.master_data.current_phase = next_key
-            project.phases[next_key].status = "active"
-            project.phases[next_key].start_date = datetime.now().strftime("%Y-%m-%d")
-            st.success(f"Phase '{phase.name}' completed — next phase '{project.phases[next_key].name}' activated")
+def t(key: str, project: HermesProject) -> str:
+    lang = project.master_data.language if project and project.master_data else "en"
+    return INSTRUCTIONS.get(lang, INSTRUCTIONS["en"]).get(key, "")
 
-# =========================================
-# REPORT GENERATION (PDF + EXCEL)
-# =========================================
-def generate_project_status_report_pdf(project: HermesProject) -> bytes:
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
-    # Title
-    story.append(Paragraph(f"HERMES Project Status Report - {project.master_data.project_name}", styles['Title']))
-    story.append(Spacer(1, 12))
-    # Executive summary
-    total_progress = calculate_total_progress(project)
-    budget_usage = calculate_budget_usage(project)
-    summary = f"Project is {total_progress:.1f}% complete. Budget usage is {budget_usage:.1%}."
-    story.append(Paragraph("Executive Summary", styles['Heading2']))
-    story.append(Paragraph(summary, styles['Normal']))
-    story.append(Spacer(1, 12))
-    # Master data table
-    master_table = [
-        ["Project Name", project.master_data.project_name],
-        ["Client", project.master_data.client],
-        ["Project Manager", project.master_data.project_manager],
-        ["User Representative", project.master_data.user_representative],
-        ["Approach", project.master_data.approach],
-        ["Project Size", project.master_data.project_size],
-        ["Start Date", project.master_data.start_date],
-        ["Budget (CHF)", f"{project.master_data.budget:,.2f}"]
-    ]
-    t = Table(master_table, colWidths=[180, 300])
-    t.setStyle(TableStyle([('BACKGROUND', (0,0),(0,-1), colors.lightgrey), ('GRID',(0,0),(-1,-1),0.5,colors.black)]))
-    story.append(t)
-    story.append(Spacer(1, 12))
-    # Phase table
-    phase_data = [["Phase", "Status", "Progress", "Completed Results"]]
-    for key, phase in project.phases.items():
-        completed_results = sum(1 for r in phase.results.values() if r.status in ("completed","approved"))
-        total_results = len(phase.results)
-        phase_data.append([phase.name, phase.status, f"{calculate_phase_progress(phase):.1f}%", f"{completed_results}/{total_results}"])
-    pt = Table(phase_data, colWidths=[150, 80, 80, 120])
-    pt.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.darkblue), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke), ('GRID',(0,0),(-1,-1),0.5,colors.black)]))
-    story.append(pt)
-    story.append(Spacer(1, 12))
-    # Milestones
-    ms_data = [["Milestone","Phase","Status","Date"]]
-    for ms in project.milestones:
-        ms_data.append([ms.name, ms.phase, ms.status, ms.date or "Not set"])
-    mst = Table(ms_data, colWidths=[160, 120, 80, 100])
-    mst.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.darkblue), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke), ('GRID',(0,0),(-1,-1),0.5,colors.black)]))
-    story.append(mst)
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
+def show_instructions(title: str, text: str):
+    with st.expander(f"ℹ️ {title} - Instructions", expanded=False):
+        st.markdown(text)
 
-def generate_project_status_report_excel(project: HermesProject) -> bytes:
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        # Executive summary
-        summary = {
-            "Metric": ["Overall Progress","Budget Usage","Completed Phases","Reached Milestones"],
-            "Value": [f"{calculate_total_progress(project):.1f}%", f"{calculate_budget_usage(project):.1%}", f"{sum(1 for p in project.phases.values() if p.status=='completed')}/{len(project.phases)}", f"{sum(1 for m in project.milestones if m.status=='reached')}/{len(project.milestones)}"]
-        }
-        pd.DataFrame(summary).to_excel(writer, sheet_name="Executive Summary", index=False)
-        # Master data
-        md = asdict(project.master_data)
-        pd.DataFrame([md]).to_excel(writer, sheet_name="Master Data", index=False)
-        # budget transactions
-        if project.budget_entries:
-            df = pd.DataFrame([asdict(t) for t in project.budget_entries])
-            df.to_excel(writer, sheet_name="Budget Transactions", index=False)
-        # phases/results
-        rows = []
-        for key, phase in project.phases.items():
-            for r in phase.results.values():
-                rows.append({
-                    "Phase": phase.name,
-                    "Result": r.name,
-                    "Status": r.status,
-                    "Approval Required": r.approval_required,
-                    "Approval Date": r.approval_date,
-                    "Responsible Role": r.responsible_role
-                })
-        pd.DataFrame(rows).to_excel(writer, sheet_name="Results", index=False)
-        # docs
-        docs = [asdict(d) for d in project.documents.values()]
-        pd.DataFrame(docs).to_excel(writer, sheet_name="Documents", index=False)
-        # milestones
-        mss = [asdict(m) for m in project.milestones]
-        pd.DataFrame(mss).to_excel(writer, sheet_name="Milestones", index=False)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-# =========================================
-# UI: DASHBOARD, INITIALIZATION, RESULTS, DOCUMENTS, MILESTONES, BUDGET, ITERATIONS
-# =========================================
-def hermes_header():
-    st.image("https://via.placeholder.com/200x60/0055A4/ffffff?text=HERMES", width=200)
-    st.title("HERMES 2022 — Project Management Assistant")
-    st.caption("Enhanced tool demonstrating HERMES concepts: tailoring, governance, checklists, roles, and reporting")
-
-def project_dashboard():
-    show_instructions("Project Dashboard", """
-    The Dashboard gives you a high-level view:
-    - Budget & timeline summary
-    - Phase progress and current phase
-    - Upcoming milestones and risks
-    Tip: Use the export buttons below to create stakeholder reports.
-    """)
+# ----------------------
+# PROJECT INITIALIZATION
+# ----------------------
+def project_initialization():
+    st.header("🚀 Project Initialization")
     project = st.session_state.hermes_project
-    if not project.master_data.project_name:
-        st.info("Please initialize your project in 'Project Initialization'.")
-        return
-    # metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Project", project.master_data.project_name)
-    with col2:
-        st.metric("Approach", project.master_data.approach.title())
-    with col3:
-        st.metric("Project Size", project.master_data.project_size.title())
-    with col4:
-        st.metric("Current Phase", project.master_data.current_phase.title())
-    # budget overview
-    budget_usage = calculate_budget_usage(project)
-    st.subheader("Budget")
-    st.metric("Budget (CHF)", f"{project.master_data.budget:,.2f}")
-    st.metric("Budget Usage", f"{budget_usage:.1%}")
-    # phases progress
-    st.subheader("Phase Progress")
-    for k, ph in project.phases.items():
-        st.write(f"**{ph.name}** — {ph.status.title()}")
-        prog = calculate_phase_progress(ph)
-        st.progress(prog / 100)
-        st.caption(f"{sum(1 for r in ph.results.values() if r.status in ('completed','approved'))}/{len(ph.results)} results done")
-    # next milestones
-    st.subheader("Upcoming Milestones")
-    upcoming = [m for m in project.milestones if m.status in ("planned","delayed")]
-    if upcoming:
-        for m in upcoming[:5]:
-            st.write(f"- {m.name} ({m.phase}) — {m.status}")
-    else:
-        st.info("No upcoming milestones defined.")
-
-    # report exports
-    st.markdown("---")
-    st.subheader("Export Reports")
-    col1, col2 = st.columns(2)
-    with col1:
-        pdf = generate_project_status_report_pdf(project)
-        st.download_button("Download PDF Status Report", data=pdf, file_name=f"status_{project.master_data.project_name}.pdf", mime="application/pdf")
-    with col2:
-        xl = generate_project_status_report_excel(project)
-        st.download_button("Download Excel Status Report", data=xl, file_name=f"status_{project.master_data.project_name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-def enhanced_project_initialization():
-    show_instructions("Project Initialization", """
-    Initialize project: provide master data, choose approach (classical or agile) and project size.
-    Tailoring will be applied automatically after initialization.
-    """)
-    project = st.session_state.hermes_project
+    show_instructions("Project Initialization", t("initialization", project))
     with st.form("init_form"):
         col1, col2 = st.columns(2)
         with col1:
-            project.master_data.project_name = st.text_input("Project Name*", project.master_data.project_name)
-            project.master_data.client = st.text_input("Client*", project.master_data.client)
-            project.master_data.project_manager = st.text_input("Project Manager*", project.master_data.project_manager)
-            project.master_data.user_representative = st.text_input("User Representative*", project.master_data.user_representative)
+            project.master_data.project_name = st.text_input("Project Name", project.master_data.project_name)
+            project.master_data.client = st.text_input("Client", project.master_data.client)
+            project.master_data.project_manager = st.text_input("Project Manager", project.master_data.project_manager)
+            project.master_data.user_representative = st.text_input("User Representative", project.master_data.user_representative)
         with col2:
-            start_val = datetime.now() if not project.master_data.start_date else datetime.strptime(project.master_data.start_date, "%Y-%m-%d")
-            project.master_data.start_date = st.date_input("Start Date*", start_val).strftime("%Y-%m-%d")
-            project.master_data.budget = st.number_input("Budget (CHF)*", min_value=0.0, value=project.master_data.budget or 100000.0, step=1000.0)
-            approach = st.selectbox("Approach*", ["classical","agile"], index=0 if project.master_data.approach=="classical" else 1)
-            project.master_data.approach = approach
-            size = st.selectbox("Project Size*", ["small","medium","large"], index=["small","medium","large"].index(project.master_data.project_size))
-            project.master_data.project_size = size
-        submitted = st.form_submit_button("Initialize Project")
-        if submitted:
-            missing = validate_minimal_roles(project)
-            if missing:
-                st.error(f"Missing mandatory roles: {', '.join(missing)}")
-            elif not project.master_data.project_name:
-                st.error("Project name is required.")
-            else:
-                initialize_standard_phases(project)
-                init_project_structure(project)
-                apply_project_size_tailoring(project)
-                # create mandatory milestones from size config
-                config = PROJECT_SIZE_CONFIGS.get(project.master_data.project_size)
-                project.milestones = []
-                for i, ms_name in enumerate(config.mandatory_milestones):
-                    phase = "initialization" if "Initialization" in ms_name else project.master_data.current_phase
-                    project.milestones.append(HermesMilestone(name=ms_name, phase=phase, mandatory=True))
-                st.success("Project initialized and tailoring applied.")
-                st.experimental_rerun()
+            sd = datetime.now() if not project.master_data.start_date else datetime.strptime(project.master_data.start_date, "%Y-%m-%d")
+            project.master_data.start_date = st.date_input("Start Date", sd).strftime("%Y-%m-%d")
+            project.master_data.budget = st.number_input("Budget (CHF)", min_value=0.0, value=float(project.master_data.budget or 100000.0))
+            project.master_data.approach = st.selectbox("Approach", ["classical", "agile"], index=0 if project.master_data.approach=="classical" else 1)
+            project.master_data.project_size = st.selectbox("Project Size", ["small","medium","large"], index=["small","medium","large"].index(project.master_data.project_size))
+            project.master_data.language = st.selectbox("Language / Sprache", ["en","de"], index=0 if project.master_data.language=="en" else 1)
+        if st.form_submit_button("Initialize Project"):
+            # apply tailoring
+            apply_tailoring(project)
+            st.success("Project initialized and tailoring applied!")
 
+def apply_tailoring(project: HermesProject):
+    cfg = PROJECT_SIZE_CONFIGS.get(project.master_data.project_size, PROJECT_SIZE_CONFIGS["medium"])
+    # mark documents
+    for docname, doc in project.documents.items():
+        doc.required = docname in cfg["required_documents"]
+    # add any missing required documents
+    for dn in cfg["required_documents"]:
+        if dn not in project.documents:
+            project.documents[dn] = HermesDocument(name=dn, responsible="Project Manager", required=True)
+    project.tailoring = {"size": project.master_data.project_size, "simplified_checklists": cfg["simplified_checklists"]}
+    # ensure mandatory milestones present
+    for mn in cfg["mandatory_milestones"]:
+        if not any(m.name == mn for m in project.milestones):
+            # map names to phases roughly
+            phase_map = {
+                "Project Start":"initialization",
+                "Implementation Decision":"concept",
+                "Phase Release Concept":"concept",
+                "Phase Release Realization":"implementation",
+                "Project Completed":"completion"
+            }
+            project.milestones.append(HermesMilestone(name=mn, phase=phase_map.get(mn, "implementation"), mandatory=True))
+
+# ----------------------
+# RESULTS MANAGEMENT
+# ----------------------
 def results_management():
-    show_instructions("Results Management", """
-    Manage phase results: update statuses, request approvals (if required), and assign responsible roles.
-    Approved results are required for phase completion.
-    """)
+    st.header("📋 Results Management")
     project = st.session_state.hermes_project
-    for key, phase in project.phases.items():
-        with st.expander(f"{phase.name} — {phase.status}", expanded=False):
-            # add ability to add a result from templates
-            st.write("Add result from templates:")
-            tmpl = st.selectbox(f"Choose template to add ({phase.name})", [""] + list(RESULT_TEMPLATES.keys()), key=f"tmpl_{key}")
-            if tmpl:
-                if st.button(f"Add '{tmpl}' to {phase.name}", key=f"addres_{key}_{tmpl}"):
-                    t = RESULT_TEMPLATES[tmpl]
-                    phase.results[tmpl] = PhaseResult(name=tmpl, description=t.get("description",""), approval_required=t.get("approval_required", False), responsible_role=t.get("role",""))
-                    st.success(f"Result '{tmpl}' added to phase {phase.name}")
-            # show results
-            for rname, r in phase.results.items():
-                col1, col2, col3 = st.columns([3,2,2])
-                with col1:
-                    st.write(f"**{rname}**")
-                    st.caption(r.description)
-                    st.write(f"Responsible role: {r.responsible_role or '—'}")
-                with col2:
-                    new_status = st.selectbox("Status", ["not_started","in_progress","completed","approved"], index=["not_started","in_progress","completed","approved"].index(r.status), key=f"resstat_{key}_{rname}")
-                    if new_status != r.status:
-                        r.status = new_status
+    show_instructions("Results Management", t("results", project))
+    for phase_key, phase in project.phases.items():
+        with st.expander(f"{phase.name} (status: {phase.status})", expanded=False):
+            # create results if empty (defaults)
+            if not phase.results:
+                # add example results depending on phase
+                if phase_key == "initialization":
+                    phase.results["Project Charter"] = PhaseResult(name="Project Charter", approval_required=True, responsible_role="Project Manager")
+                    phase.results["Stakeholder Analysis"] = PhaseResult(name="Stakeholder Analysis", responsible_role="Project Manager")
+                elif phase_key == "concept":
+                    phase.results["Solution Requirements"] = PhaseResult(name="Solution Requirements", approval_required=True, responsible_role="User Representative")
+                    phase.results["Solution Architecture"] = PhaseResult(name="Solution Architecture", approval_required=True, responsible_role="Project Manager")
+                elif phase_key == "implementation":
+                    phase.results["Increment Delivery"] = PhaseResult(name="Increment Delivery", responsible_role="Project Manager")
+                elif phase_key == "introduction":
+                    phase.results["Operational Handover"] = PhaseResult(name="Operational Handover", responsible_role="Project Manager")
+                elif phase_key == "completion":
+                    phase.results["Project Completion Report"] = PhaseResult(name="Project Completion Report", approval_required=True, responsible_role="Project Manager")
+            for rkey, result in phase.results.items():
+                cols = st.columns([3,1,1])
+                with cols[0]:
+                    st.write(f"**{result.name}**")
+                    if result.description:
+                        st.caption(result.description)
+                    st.caption(f"Responsible Role: {result.responsible_role or '—'}")
+                with cols[1]:
+                    new_status = st.selectbox(f"Status {phase_key}_{rkey}", ["not_started","in_progress","completed","approved"], index=["not_started","in_progress","completed","approved"].index(result.status))
+                    if new_status != result.status:
+                        result.status = new_status
                         if new_status == "approved":
-                            r.approval_date = datetime.now().strftime("%Y-%m-%d")
-                with col3:
-                    if r.approval_required:
-                        st.write("Approval required")
-                    else:
-                        st.write("No approval required")
+                            result.approval_date = datetime.now().strftime("%Y-%m-%d")
+                with cols[2]:
+                    if result.approval_required and result.status == "completed":
+                        if st.button(f"Request Approval {phase_key}_{rkey}"):
+                            result.status = "approved"
+                            result.approval_date = datetime.now().strftime("%Y-%m-%d")
+                            st.success("Result approved")
 
-def enhanced_documents_center():
-    show_instructions("Document Center", """
-    Manage project documents: assign responsibles, update statuses and link documents to results.
-    When a linked document is completed, the linked result is automatically updated to 'completed'.
-    """)
+# ----------------------
+# DOCUMENTS CENTER
+# ----------------------
+def documents_center():
+    st.header("📄 Documents")
     project = st.session_state.hermes_project
+    show_instructions("Documents", t("documents", project))
     if not project.documents:
-        st.info("No documents available. Initialize project first.")
+        st.info("No documents configured yet. Initialize project first.")
         return
     # stats
-    status_counts = {}
-    for d in project.documents.values():
-        status_counts[d.status] = status_counts.get(d.status,0)+1
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Docs", len(project.documents))
-    with col2:
-        st.metric("Completed", status_counts.get("completed",0))
-    with col3:
-        st.metric("In Progress", status_counts.get("in_progress",0))
-    # list and edit
+    st.metric("Total documents", len(project.documents))
     for dname, doc in project.documents.items():
-        with st.expander(f"{dname} — {doc.status}", expanded=False):
-            col1, col2 = st.columns([3,1])
-            with col1:
-                st.write(f"Responsible: {doc.responsible}")
-                if doc.linked_result:
-                    st.write(f"Linked result: {doc.linked_result}")
-                doc.content = st.text_area("Content / Notes", value=doc.content, key=f"doccont_{dname}")
-            with col2:
-                new_status = st.selectbox("Status", ["not_started","in_progress","completed"], index=["not_started","in_progress","completed"].index(doc.status), key=f"docstat_{dname}")
-                doc.responsible = st.selectbox("Responsible", list(project.roles.values()), index=list(project.roles.values()).index(doc.responsible) if doc.responsible in project.roles.values() else 0, key=f"docresp_{dname}")
-                if new_status != doc.status:
-                    doc.status = new_status
+        with st.expander(f"{dname} - {doc.status}", expanded=False):
+            cols = st.columns([3,1])
+            with cols[0]:
+                st.write(f"**Responsible:** {doc.responsible}")
+                st.write(f"**Linked Result:** {doc.linked_result or '—'}")
+                doc.content = st.text_area(f"Content for {dname}", value=doc.content, key=f"content_{dname}")
+            with cols[1]:
+                new = st.selectbox(f"Status_{dname}", ["not_started","in_progress","completed"], index=["not_started","in_progress","completed"].index(doc.status))
+                if new != doc.status:
+                    doc.status = new
+                    # sync to result if applicable
                     if doc.status == "completed" and doc.linked_result:
-                        sync_document_to_result(doc, project)
-                        st.success(f"Document completed and linked result '{doc.linked_result}' updated.")
-            # quick download placeholder
-            if st.button("Export Document (txt)", key=f"export_{dname}"):
-                st.download_button(label=f"Download {dname}.txt", data=doc.content or f"{dname}\n\n(no content)", file_name=f"{dname.replace(' ', '_')}.txt", mime="text/plain")
+                        for p in project.phases.values():
+                            if doc.linked_result in p.results:
+                                p.results[doc.linked_result].status = "completed"
+                                st.success(f"Linked result '{doc.linked_result}' updated to completed")
+                                break
 
-def enhanced_milestone_timeline():
-    show_instructions("Milestone Management", """
-    Visualize and manage milestones. Milestones can only be 'reached' when all governance checks for the associated phase pass.
-    Use "Reach" to mark the milestone reached (requires checks to pass).
-    """)
+# ----------------------
+# BUDGET MANAGEMENT
+# ----------------------
+def budget_management():
+    st.header("💰 Budget Management")
     project = st.session_state.hermes_project
-    if not project.milestones:
-        st.info("No milestones configured. They are created during initialization (tailoring).")
-        return
-    # prepare timeline
-    fig = go.Figure()
-    for i, ms in enumerate(project.milestones):
-        x = datetime.now() if not ms.date else datetime.strptime(ms.date, "%Y-%m-%d")
-        color = "green" if ms.status=="reached" else "orange" if validate_milestone_completion(ms, project)["can_reach"] else "blue"
-        fig.add_trace(go.Scatter(x=[x], y=[i], mode='markers+text', text=[ms.name], textposition="middle right", marker=dict(size=15, color=color)))
-    fig.update_layout(title="Milestones", xaxis_title="Date", yaxis=dict(showticklabels=False), height=350, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
-    # details
-    for ms in project.milestones:
-        with st.expander(f"{ms.name} ({ms.phase}) — {ms.status}", expanded=False):
-            val = validate_milestone_completion(ms, project)
-            st.write("Completion checks:")
-            st.write(f"- Phase results complete: {'✅' if val['phase_results_complete'] else '❌'}")
-            st.write(f"- Required documents complete: {'✅' if val['required_documents_complete'] else '❌'}")
-            st.write(f"- Checklists complete: {'✅' if val['checklists_complete'] else '❌'}")
-            if ms.status != "reached":
-                if val["can_reach"]:
-                    if st.button(f"Reach milestone: {ms.name}", key=f"reach_{ms.name}"):
-                        ms.status = "reached"
-                        ms.date = datetime.now().strftime("%Y-%m-%d")
-                        st.success(f"Milestone '{ms.name}' reached.")
-                        st.experimental_rerun()
-                else:
-                    st.info("Milestone cannot be reached yet — complete requirements first.")
-
-def enhanced_budget_management():
-    show_instructions("Budget Management", """
-    Add transactions (planned or actual). Actual transactions reduce remaining budget and affect release approvals.
-    Use the charts and export functions to analyze spend.
-    """)
-    project = st.session_state.hermes_project
-    if not project.master_data.project_name:
-        st.info("Please initialize the project first.")
-        return
+    show_instructions("Budget Management", t("budget", project))
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Budget (CHF)", f"{project.master_data.budget:,.2f}")
+        st.metric("Planned Budget", f"CHF {project.master_data.budget:,.2f}")
         actual = sum(t.amount for t in project.budget_entries if t.type=="actual")
-        st.metric("Actual Costs", f"{actual:,.2f}")
-        st.metric("Remaining", f"{project.master_data.budget-actual:,.2f}")
-        # traffic light
+        st.metric("Actual Costs", f"CHF {actual:,.2f}")
+        st.metric("Remaining", f"CHF {project.master_data.budget - actual:,.2f}")
         usage = calculate_budget_usage(project)
         if usage < 0.7:
-            st.success(f"Usage: {usage:.1%}")
+            st.success(f"Budget Usage: {usage:.1%}")
         elif usage < 0.9:
-            st.warning(f"Usage: {usage:.1%}")
+            st.warning(f"Budget Usage: {usage:.1%}")
         else:
-            st.error(f"Usage: {usage:.1%}")
+            st.error(f"Budget Usage: {usage:.1%}")
     with col2:
         with st.form("tx_form"):
-            tx_date = st.date_input("Date", datetime.now()).strftime("%Y-%m-%d")
-            category = st.selectbox("Category", ["Personnel","Hardware","Software","External Services","Training","Travel","Other"])
-            amount = st.number_input("Amount (CHF)", min_value=0.0, step=100.0)
+            date = st.date_input("Date", datetime.now())
+            cat = st.selectbox("Category", ["Personnel","Hardware","Software","External Services","Training","Travel","Other"])
+            amt = st.number_input("Amount (CHF)", min_value=0.0, value=0.0, step=100.0)
             desc = st.text_input("Description")
-            tx_type = st.selectbox("Type", ["actual","planned"])
+            typ = st.selectbox("Type", ["actual","planned"])
             if st.form_submit_button("Add Transaction"):
-                project.budget_entries.append(BudgetTransaction(date=tx_date, category=category, amount=amount, description=desc, type=tx_type))
-                st.success("Transaction added.")
+                tx = BudgetTransaction(date=date.strftime("%Y-%m-%d"), category=cat, amount=amt, description=desc, type=typ)
+                project.budget_entries.append(tx)
+                st.success("Transaction added")
                 st.experimental_rerun()
     # show table and charts
     if project.budget_entries:
         df = pd.DataFrame([asdict(t) for t in project.budget_entries])
         st.dataframe(df, use_container_width=True)
-        # pie by category (actual only)
-        actual_df = df[df["type"]=="actual"]
-        if not actual_df.empty:
-            cat = actual_df.groupby("category")["amount"].sum()
-            fig = px.pie(values=cat.values, names=cat.index, title="Spending by Category")
+        # pie by category (actual)
+        df_act = df[df['type']=='actual']
+        if not df_act.empty:
+            cat_sum = df_act.groupby('category')['amount'].sum()
+            fig = px.pie(values=cat_sum.values, names=cat_sum.index, title="Spending by Category")
             st.plotly_chart(fig, use_container_width=True)
+            # cumulative
+            df_act['date'] = pd.to_datetime(df_act['date'])
+            ts = df_act.groupby('date')['amount'].sum().cumsum()
+            fig2 = px.line(x=ts.index, y=ts.values, title="Cumulative Spending")
+            st.plotly_chart(fig2, use_container_width=True)
         # export
-        if st.button("Export Budget (Excel)"):
-            out = BytesIO()
-            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-                df.to_excel(writer, index=False, sheet_name="Transactions")
-                summary = pd.DataFrame([{"Metric":"Budget","Value":project.master_data.budget},{"Metric":"Actual","Value":sum(actual_df['amount'])}])
-                summary.to_excel(writer, index=False, sheet_name="Summary")
-            out.seek(0)
-            st.download_button("Download Budget Excel", data=out.getvalue(), file_name=f"budget_{project.master_data.project_name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if st.button("Export transactions to Excel"):
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine='xlsxwriter') as w:
+                df.to_excel(w, sheet_name='Transactions', index=False)
+            st.download_button("Download Excel", data=buf.getvalue(), file_name=f"transactions_{datetime.now().strftime('%Y%m%d')}.xlsx")
 
-def enhanced_iteration_management():
-    show_instructions("Iterations & Releases", """
-    Create iterations (sprints) for agile projects. For release candidates the governance checks are performed before approval.
-    Approving a release will create a milestone and mark the release result as approved.
-    """)
+# ----------------------
+# MILESTONES (visual + governance)
+# ----------------------
+def validate_milestone_completion(ms: HermesMilestone, project: HermesProject) -> Dict[str,bool]:
+    result = {"phase_results_complete": True, "required_documents_complete": True, "checklists_complete": True, "can_reach": True}
+    phase = project.phases.get(ms.phase)
+    if phase:
+        for r in phase.results.values():
+            if r.approval_required and r.status != "approved":
+                result["phase_results_complete"]=False
+                break
+        for doc_name in phase.required_documents:
+            d = project.documents.get(doc_name)
+            if d and d.required and d.status != "completed":
+                result["required_documents_complete"]=False
+                break
+        if phase.checklist_results:
+            if not all(phase.checklist_results.values()):
+                result["checklists_complete"]=False
+    result["can_reach"] = all([result["phase_results_complete"], result["required_documents_complete"], result["checklists_complete"]])
+    return result
+
+def milestones_view():
+    st.header("🎯 Milestones")
     project = st.session_state.hermes_project
-    if project.master_data.approach != "agile":
-        st.info("Switch project approach to 'agile' in Project Initialization to manage iterations.")
+    show_instructions("Milestone Management", t("milestones", project))
+    if not project.milestones:
+        st.info("No milestones configured.")
         return
-    with st.expander("Add New Iteration"):
-        with st.form("iter_form"):
-            num = st.number_input("Iteration Number", min_value=1, value=1)
-            name = st.text_input("Iteration Name", f"Sprint {num}")
-            start = st.date_input("Start Date", datetime.now())
-            end = st.date_input("End Date", datetime.now() + timedelta(days=14))
-            total = st.number_input("Total User Stories", min_value=0, value=10)
-            release_candidate = st.checkbox("Release Candidate")
-            goals = st.text_area("Goals (one per line)").split("\n")
-            if st.form_submit_button("Create Iteration"):
-                it = Iteration(number=int(num), name=name, start_date=start.strftime("%Y-%m-%d"), end_date=end.strftime("%Y-%m-%d"), total_user_stories=int(total), release_candidate=release_candidate, goals=[g.strip() for g in goals if g.strip()])
+    # plot
+    dates = []
+    labels = []
+    colors_map = []
+    for i, ms in enumerate(project.milestones):
+        d = datetime.now() if not ms.date else datetime.strptime(ms.date, "%Y-%m-%d")
+        dates.append(d)
+        labels.append(ms.name)
+        colors_map.append("green" if ms.status=="reached" else "blue")
+    fig = go.Figure()
+    for i,(d,l,c) in enumerate(zip(dates, labels, colors_map)):
+        fig.add_trace(go.Scatter(x=[d], y=[i], mode='markers+text', marker=dict(size=14, color=c), text=[l], textposition='middle right'))
+    fig.update_layout(yaxis=dict(showticklabels=False), height=350, title="Milestone timeline")
+    st.plotly_chart(fig, use_container_width=True)
+    # details
+    for ms in project.milestones:
+        with st.expander(f"{ms.name} ({ms.phase}) - {ms.status}", expanded=False):
+            st.write(f"Mandatory: {'Yes' if ms.mandatory else 'No'}")
+            if ms.date:
+                st.write("Date:", ms.date)
+            validation = validate_milestone_completion(ms, project)
+            if validation["phase_results_complete"]:
+                st.success("Phase results OK")
+            else:
+                st.error("Phase results not OK")
+            if validation["required_documents_complete"]:
+                st.success("Required docs OK")
+            else:
+                st.error("Required docs missing")
+            if validation["checklists_complete"]:
+                st.success("Checklists OK")
+            else:
+                st.error("Checklists not OK")
+            if ms.status != "reached":
+                if validation["can_reach"]:
+                    if st.button(f"Reach milestone: {ms.name}"):
+                        ms.status = "reached"
+                        ms.date = datetime.now().strftime("%Y-%m-%d")
+                        st.success("Milestone reached")
+                        st.experimental_rerun()
+                else:
+                    st.info("Milestone prerequisites not fulfilled")
+
+# ----------------------
+# ITERATIONS & RELEASES
+# ----------------------
+def iterations_view():
+    st.header("🔄 Iterations & Releases")
+    project = st.session_state.hermes_project
+    show_instructions("Iterations & Releases", t("iterations", project))
+    if project.master_data.approach != "agile":
+        st.info("Switch project approach to 'agile' to manage iterations.")
+        return
+    with st.expander("➕ Create new iteration", expanded=False):
+        with st.form("it_form"):
+            num = st.number_input("Iteration number", min_value=1, value=1)
+            name = st.text_input("Name", f"Sprint {num}")
+            sd = st.date_input("Start date", datetime.now())
+            ed = st.date_input("End date", datetime.now()+timedelta(days=14))
+            total = st.number_input("Total user stories", min_value=0, value=10)
+            rc = st.checkbox("Release candidate")
+            goals = st.text_area("Goals (one per line)").splitlines()
+            if st.form_submit_button("Create iteration"):
+                it = Iteration(number=int(num), name=name, start_date=sd.strftime("%Y-%m-%d"), end_date=ed.strftime("%Y-%m-%d"),
+                               total_user_stories=int(total), release_candidate=rc, goals=[g.strip() for g in goals if g.strip()])
                 project.iterations.append(it)
-                # ensure release result exists in implementation phase
-                release_res_name = f"Release {it.number}"
-                impl_phase_key = "implementation" if "implementation" in project.phases else "realization"
-                if impl_phase_key in project.phases and release_res_name not in project.phases[impl_phase_key].results:
-                    project.phases[impl_phase_key].results[release_res_name] = PhaseResult(name=release_res_name, description=f"Release result for {it.name}", approval_required=True, responsible_role="project_manager")
-                # create release doc placeholder
-                docname = f"Release Report {it.number}"
-                if docname not in project.documents:
-                    project.documents[docname] = HermesDocument(name=docname, responsible="Project Manager", status="not_started", linked_result=release_res_name, required=True)
-                st.success("Iteration created.")
+                # create release result and doc
+                release_result_name = f"Release {it.number}"
+                impl = project.phases.get("implementation")
+                if impl and release_result_name not in impl.results:
+                    impl.results[release_result_name] = PhaseResult(name=release_result_name, approval_required=True, responsible_role="Project Manager")
+                release_doc_name = f"Release Report {it.number}"
+                if release_doc_name not in project.documents:
+                    project.documents[release_doc_name] = HermesDocument(name=release_doc_name, responsible="Project Manager", linked_result=release_result_name)
+                st.success("Iteration created")
                 st.experimental_rerun()
-    # list iterations
-    for it in sorted(project.iterations, key=lambda x: x.number):
-        with st.expander(f"Iteration {it.number}: {it.name} ({it.status})"):
-            st.write(f"Period: {it.start_date} — {it.end_date}")
+    # display iterations
+    for it in project.iterations:
+        with st.expander(f"{it.number} - {it.name} ({it.status})", expanded=False):
+            st.write(f"Period: {it.start_date} to {it.end_date}")
             st.write(f"Progress: {it.progress():.1f}%")
-            comp = st.number_input("Completed Stories", min_value=0, max_value=it.total_user_stories, value=it.completed_user_stories, key=f"comp_{it.number}")
-            it.completed_user_stories = comp
-            it.status = st.selectbox("Status", ["planned","active","completed"], index=["planned","active","completed"].index(it.status), key=f"stat_{it.number}")
+            it.completed_user_stories = st.number_input(f"Completed stories {it.number}", min_value=0, max_value=it.total_user_stories, value=it.completed_user_stories, key=f"comp_{it.number}")
+            it.status = st.selectbox(f"Status {it.number}", ["planned","active","completed"], index=["planned","active","completed"].index(it.status), key=f"status_{it.number}")
             if it.release_candidate:
-                st.info("This iteration is a release candidate.")
-                # perform validation for approval
-                val = validate_release_approval(it, project)
-                st.write("Release checks:")
-                st.write(f"- Release document complete: {'✅' if val['release_document_complete'] else '❌'}")
-                st.write(f"- Release result approved: {'✅' if val['release_result_approved'] else '❌'}")
-                st.write(f"- Budget healthy: {'✅' if val['budget_healthy'] else '❌'}")
-                st.write(f"- Milestones on track: {'✅' if val['milestones_on_track'] else '❌'}")
-                if not it.release_approved and val["can_approve"]:
-                    if st.button(f"Approve Release {it.number}", key=f"approve_{it.number}"):
+                st.info("Release candidate")
+                # validation for approval
+                validation = validate_release_approval(it, project)
+                st.write("Release validation:")
+                for k,v in validation.items():
+                    st.write(f"{k}: {'OK' if v else 'NO'}")
+                if not it.release_approved and validation.get("can_approve", False):
+                    if st.button(f"Approve release {it.number}"):
                         it.release_approved = True
                         it.status = "completed"
                         # mark release result approved
-                        release_result_name = f"Release {it.number}"
-                        impl_key = "implementation" if "implementation" in project.phases else "realization"
-                        if impl_key in project.phases and release_result_name in project.phases[impl_key].results:
-                            project.phases[impl_key].results[release_result_name].status = "approved"
-                            project.phases[impl_key].results[release_result_name].approval_date = datetime.now().strftime("%Y-%m-%d")
-                        # create milestone
-                        project.milestones.append(HermesMilestone(name=f"Release {it.number} - {it.name}", phase=impl_key, date=datetime.now().strftime("%Y-%m-%d"), status="reached", mandatory=False))
-                        st.success("Release approved.")
-                elif it.release_approved:
-                    st.success("Release already approved.")
+                        impl = project.phases.get("implementation")
+                        rr = f"Release {it.number}"
+                        if impl and rr in impl.results:
+                            impl.results[rr].status = "approved"
+                            impl.results[rr].approval_date = datetime.now().strftime("%Y-%m-%d")
+                        # add milestone
+                        project.milestones.append(HermesMilestone(name=f"Release {it.number}", phase="implementation", date=datetime.now().strftime("%Y-%m-%d"), status="reached", mandatory=False))
+                        st.success("Release approved")
 
-# comprehensive release approval validation used above
-def validate_release_approval(iteration: Iteration, project: HermesProject) -> Dict[str, bool]:
+# release validation (safe)
+def validate_release_approval(iteration: Iteration, project: HermesProject) -> Dict[str,bool]:
     res = {"release_document_complete": True, "release_result_approved": True, "budget_healthy": True, "milestones_on_track": True, "can_approve": True}
-    # release doc
-    docname = f"Release Report {iteration.number}"
-    doc = project.documents.get(docname)
-    if not doc or doc.status != "completed":
+    rdoc = project.documents.get(f"Release Report {iteration.number}")
+    if not rdoc or rdoc.status != "completed":
         res["release_document_complete"] = False
-    # release result
-    release_name = f"Release {iteration.number}"
-    impl_key = "implementation" if "implementation" in project.phases else "realization"
-    if impl_key in project.phases and release_name in project.phases[impl_key].results:
-        r = project.phases[impl_key].results[release_name]
-        if r.status != "completed":
-            res["release_result_approved"] = False
-    else:
+    impl = project.phases.get("implementation")
+    rr = f"Release {iteration.number}"
+    if not impl or rr not in impl.results or impl.results[rr].status not in ["completed","approved"]:
         res["release_result_approved"] = False
-    # budget health
+    # budget health: safe calc
     usage = calculate_budget_usage(project)
     if usage > 0.9:
         res["budget_healthy"] = False
-    # critical milestones in implementation
-    for ms in project.milestones:
-        if ms.mandatory and ms.phase == impl_key and ms.status != "reached":
-            res["milestones_on_track"] = False
-    res["can_approve"] = all(res.values())
+    # mandatory implementation-phase milestones reached?
+    cms = [m for m in project.milestones if m.mandatory and m.phase=="implementation"]
+    if any(m.status != "reached" for m in cms):
+        res["milestones_on_track"] = False
+    res["can_approve"] = all([res["release_document_complete"], res["release_result_approved"], res["budget_healthy"], res["milestones_on_track"]])
     return res
 
-def phase_governance():
-    show_instructions("Phase Governance", """
-    Governance area for each phase: complete checklists, ensure docs & results are ready, then complete phases and move forward.
-    """)
+# ----------------------
+# REPORTS (PDF & EXCEL) WITH CHARTS
+# ----------------------
+def generate_budget_chart_png(project: HermesProject) -> BytesIO:
+    actual = sum(t.amount for t in project.budget_entries if t.type=="actual")
+    planned = project.master_data.budget or 0.0
+    remaining = max(planned - actual, 0.0)
+    labels = ["Actual", "Remaining"]
+    vals = [actual, remaining]
+    fig, ax = plt.subplots(figsize=(4,3))
+    ax.pie(vals, labels=labels, autopct="%1.1f%%", startangle=90)
+    ax.set_title("Budget Usage")
+    buf = BytesIO()
+    plt.tight_layout()
+    fig.savefig(buf, format='png')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def generate_status_report_pdf(project: HermesProject) -> bytes:
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
+    story.append(Paragraph(f"HERMES Project Status Report - {project.master_data.project_name}", styles['Title']))
+    story.append(Spacer(1,12))
+    story.append(Paragraph(f"Report Date: {datetime.now().strftime('%Y-%m-%d')}", styles['Normal']))
+    story.append(Spacer(1,8))
+    # executive summary
+    story.append(Paragraph("Executive Summary", styles['Heading2']))
+    tot = calculate_total_progress(project)
+    usage = calculate_budget_usage(project)
+    story.append(Paragraph(f"Overall progress: {tot:.1f}%, Budget used: {usage:.1%}", styles['Normal']))
+    story.append(Spacer(1,8))
+    # budget chart
+    chart = generate_budget_chart_png(project)
+    story.append(Image(chart, width=300, height=200))
+    story.append(Spacer(1,12))
+    # phases table (simple)
+    data = [["Phase","Status","Progress"]]
+    for k,p in project.phases.items():
+        data.append([p.name, p.status, f"{calculate_phase_progress(p):.1f}%"])
+    tbl = Table(data, colWidths=[150,150,150])
+    tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.darkblue),('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),('GRID',(0,0),(-1,-1),0.5,colors.grey)]))
+    story.append(tbl)
+    story.append(Spacer(1,12))
+    # milestones
+    msdata = [["Milestone","Phase","Status","Date"]]
+    for m in project.milestones:
+        msdata.append([m.name, m.phase, m.status, m.date or "Not set"])
+    ms_tbl = Table(msdata, colWidths=[150,120,100,100])
+    ms_tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.darkblue),('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),('GRID',(0,0),(-1,-1),0.5,colors.grey)]))
+    story.append(ms_tbl)
+    story.append(Spacer(1,12))
+    # recommendations
+    story.append(Paragraph("Recommendations", styles['Heading2']))
+    if usage > 0.8:
+        story.append(Paragraph("Review budget allocation - high usage detected", styles['Normal']))
+    # build and return
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+def generate_status_report_excel(project: HermesProject) -> bytes:
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+        # Master
+        md = project.master_data
+        dfm = pd.DataFrame([{"Project Name": md.project_name, "Client": md.client, "Project Manager": md.project_manager, "Start Date": md.start_date, "Budget": md.budget, "Approach": md.approach, "Size": md.project_size}])
+        dfm.to_excel(writer, sheet_name='Master', index=False)
+        # phases
+        phases_list = []
+        for k,p in project.phases.items():
+            phases_list.append({"Phase": p.name, "Status": p.status, "Progress": f"{calculate_phase_progress(p):.1f}%"})
+        pd.DataFrame(phases_list).to_excel(writer, sheet_name='Phases', index=False)
+        # milestones
+        pd.DataFrame([asdict(m) for m in project.milestones]).to_excel(writer, sheet_name='Milestones', index=False)
+        # budget transactions
+        if project.budget_entries:
+            pd.DataFrame([asdict(t) for t in project.budget_entries]).to_excel(writer, sheet_name='Transactions', index=False)
+        # results
+        results = []
+        for pk,p in project.phases.items():
+            for rn,r in p.results.items():
+                results.append({"Phase": p.name, "Result": r.name, "Status": r.status, "Approval required": r.approval_required, "Approval date": r.approval_date, "Responsible": r.responsible_role})
+        pd.DataFrame(results).to_excel(writer, sheet_name='Results', index=False)
+    buf.seek(0)
+    return buf.getvalue()
+
+# ----------------------
+# PERSISTENCE: export/import project JSON
+# ----------------------
+def export_project_json(project: HermesProject) -> bytes:
+    d = dataclass_to_dict(project)
+    return json.dumps(d, indent=2).encode("utf-8")
+
+def import_project_json_bytes(b: bytes) -> HermesProject:
+    try:
+        d = json.loads(b.decode("utf-8"))
+        return dict_to_dataclass(d)
+    except Exception as e:
+        st.error(f"Import error: {e}")
+        return HermesProject()
+
+# ----------------------
+# DASHBOARD
+# ----------------------
+def dashboard_view():
     project = st.session_state.hermes_project
-    for key, phase in project.phases.items():
-        with st.expander(f"{phase.name} — {phase.status}"):
-            st.write("Checklist:")
-            # display checklist items and allow toggling
-            if phase.checklist_results:
-                for item, val in list(phase.checklist_results.items()):
-                    new = st.checkbox(item, value=val, key=f"chk_{key}_{item}")
-                    if new != val:
-                        phase.checklist_results[item] = new
-            else:
-                st.write("No checklist items configured for this phase.")
-            st.write("Required documents:")
-            for docname in phase.required_documents:
-                doc = project.documents.get(docname)
-                status = doc.status if doc else "not defined"
-                st.write(f"- {docname}: {status}")
-            # show results summary
-            st.write("Results:")
-            for r in phase.results.values():
-                st.write(f"- {r.name}: {r.status} {'(approval required)' if r.approval_required else ''}")
-            # complete phase action
-            val = validate_phase_completion(phase)
-            st.write(f"Can complete? {'✅' if val['can_complete'] else '❌'}")
-            if val["can_complete"] and st.button(f"Complete Phase {phase.name}", key=f"complete_{key}"):
-                phase.status = "completed"
-                phase.end_date = datetime.now().strftime("%Y-%m-%d")
-                # auto-advance
-                auto_advance_phase(project)
-                st.experimental_rerun()
+    st.header("🏠 Dashboard")
+    show_instructions("Dashboard", t("dashboard", project))
+    if not project.master_data.project_name:
+        st.info("Initialize project first")
+        return
+    col1,col2,col3,col4 = st.columns(4)
+    with col1:
+        st.metric("Project", project.master_data.project_name)
+    with col2:
+        st.metric("Approach", project.master_data.approach.title())
+    with col3:
+        st.metric("Size", project.master_data.project_size.title())
+    with col4:
+        st.metric("Language", project.master_data.language.upper())
+    # phase progress
+    st.subheader("Phase progress")
+    for k,p in project.phases.items():
+        prog = calculate_phase_progress(p)
+        st.write(f"**{p.name}**: {prog:.1f}%")
+        st.progress(prog/100)
+    # next milestones
+    st.subheader("Next milestones")
+    nextms = [m for m in project.milestones if m.status == "planned"][:5]
+    if nextms:
+        for m in nextms:
+            st.write(f"- {m.name} ({m.phase})")
+    else:
+        st.write("No upcoming milestones")
+    # reports
+    st.markdown("---")
+    st.subheader("Reports")
+    if st.button("Download PDF Report"):
+        pdf = generate_status_report_pdf(project)
+        st.download_button("Download PDF", data=pdf, file_name=f"status_{project.master_data.project_name}_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf")
+    if st.button("Download Excel Report"):
+        x = generate_status_report_excel(project)
+        st.download_button("Download Excel", data=x, file_name=f"status_{project.master_data.project_name}_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-def show_hermes_info():
-    st.header("ℹ️ About this HERMES Assistant")
-    st.write("""
-    This app is a demo assistant implementing many HERMES concepts:
-    - Tailoring per project size (small / medium / large)
-    - Phase-based governance with checklists and milestone gating
-    - Document <-> result synchronization
-    - Agile iterations / release governance
-    - Roles and responsibilities
-    - Reporting (PDF / Excel)
-    """)
-    st.write("Use the left menu to navigate the features. Each page has an instructions panel to guide you.")
+# ----------------------
+# SIDEBAR: save/load
+# ----------------------
+def sidebar_persistence():
+    st.sidebar.header("Project persistence")
+    project = st.session_state.hermes_project
+    # export JSON
+    if st.sidebar.button("Export project (JSON)"):
+        data = export_project_json(project)
+        st.sidebar.download_button("Download project JSON", data=data, file_name=f"hermes_project_{project.master_data.project_name or 'project'}_{datetime.now().strftime('%Y%m%d')}.json", mime="application/json")
+    # import JSON
+    uploaded = st.sidebar.file_uploader("Import project JSON", type=["json"])
+    if uploaded is not None:
+        try:
+            newproj = import_project_json_bytes(uploaded.read())
+            st.session_state.hermes_project = newproj
+            st.sidebar.success("Project imported")
+            st.experimental_rerun()
+        except Exception as e:
+            st.sidebar.error(f"Import failed: {e}")
 
-# =========================================
-# MAIN NAVIGATION
-# =========================================
+# ----------------------
+# ENTRY POINT
+# ----------------------
 def main():
-    st.set_page_config(page_title="HERMES 2022 Assistant", layout="wide")
+    st.set_page_config(page_title="HERMES 2022 App", layout="wide")
     init_session_state()
-    hermes_header()
-    menu = st.sidebar.radio("Navigation", ["Dashboard", "Project Initialization", "Results Management", "Documents", "Milestones", "Phase Governance", "Iterations & Releases", "Budget Management", "Information"])
+    sidebar_persistence()
+    st.title("HERMES 2022 — Project Management Toolkit")
+    # navigation
+    menu = st.sidebar.radio("Navigation", ["Dashboard","Project Initialization","Results","Documents","Budget","Milestones","Iterations","Reports","Information"])
     if menu == "Dashboard":
-        project_dashboard()
+        dashboard_view()
     elif menu == "Project Initialization":
-        enhanced_project_initialization()
-    elif menu == "Results Management":
+        project_initialization()
+    elif menu == "Results":
         results_management()
     elif menu == "Documents":
-        enhanced_documents_center()
+        documents_center()
+    elif menu == "Budget":
+        budget_management()
     elif menu == "Milestones":
-        enhanced_milestone_timeline()
-    elif menu == "Phase Governance":
-        phase_governance()
-    elif menu == "Iterations & Releases":
-        enhanced_iteration_management()
-    elif menu == "Budget Management":
-        enhanced_budget_management()
+        milestones_view()
+    elif menu == "Iterations":
+        iterations_view()
+    elif menu == "Reports":
+        st.header("Reports")
+        project = st.session_state.hermes_project
+        show_instructions("Reports","Generate professional PDF/Excel reports including charts and export project JSON.")
+        if st.button("Generate PDF report"):
+            pdf = generate_status_report_pdf(project)
+            st.download_button("Download PDF", data=pdf, file_name=f"status_{project.master_data.project_name}_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf")
+        if st.button("Generate Excel report"):
+            x = generate_status_report_excel(project)
+            st.download_button("Download Excel", data=x, file_name=f"status_{project.master_data.project_name}_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     elif menu == "Information":
-        show_hermes_info()
+        st.header("Information")
+        project = st.session_state.hermes_project
+        show_instructions("Info", t("info", project))
+        st.write("This HERMES app supports classical and agile projects with tailoring, checklists, documents, milestones and reporting.")
+    # footer: show quick status
+    st.markdown("---")
+    project = st.session_state.hermes_project
+    st.caption(f"Project: {project.master_data.project_name or '[none]'} | Phase: {project.current_phase} | Progress: {calculate_total_progress(project):.1f}%")
 
 if __name__ == "__main__":
     main()
